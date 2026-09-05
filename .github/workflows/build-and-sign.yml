@@ -1,0 +1,95 @@
+name: Build and Sign
+
+# Builds the UnitraMic driver and, on a tag or manual run, submits it to
+# SignPath for Microsoft attestation signing. PRs build only (no signing).
+#
+# Required repo configuration (see SIGNING.md):
+#   secrets.SIGNPATH_API_TOKEN          - SignPath CI user API token
+#   vars.SIGNPATH_ORGANIZATION_ID       - SignPath organization id (GUID)
+#   vars.SIGNPATH_PROJECT_SLUG          - e.g. "unitra-mic"
+#   vars.SIGNPATH_SIGNING_POLICY_SLUG   - policy configured for Windows driver
+#                                         *attestation* signing (e.g. "release-signing")
+#   vars.SIGNPATH_ARTIFACT_CONFIG_SLUG  - artifact configuration for the driver package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write   # attach signed artifacts to a release on tags
+  id-token: write   # SignPath OIDC (if used)
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      artifact-id: ${{ steps.upload_unsigned.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Windows Driver Kit
+        run: |
+          choco install windowsdriverkit11 -y
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Build driver (x64 Release)
+        run: msbuild VirtualAudioDriver.sln /p:Configuration=Release /p:Platform=x64
+
+      - name: Stage package
+        id: stage
+        run: |
+          $pkg = "x64\Release\package"
+          if (-not (Test-Path "$pkg\VirtualAudioDriver.inf")) {
+            Write-Host "::error::driver package not found in $pkg"; exit 1
+          }
+          Get-ChildItem $pkg
+
+      - name: Upload unsigned package
+        id: upload_unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnitraMic-unsigned-x64
+          path: |
+            x64/Release/package/VirtualAudioDriver.sys
+            x64/Release/package/VirtualAudioDriver.inf
+            x64/Release/package/virtualaudiodriver.cat
+
+  sign:
+    # Attestation signing runs only when the signing secrets exist (tags /
+    # manual runs), never on fork PRs.
+    needs: build
+    if: >
+      github.event_name != 'pull_request' &&
+      vars.SIGNPATH_ORGANIZATION_ID != ''
+    runs-on: windows-latest
+    steps:
+      - name: Submit to SignPath (Microsoft attestation)
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIG_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Upload signed package
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnitraMic-signed-x64
+          path: signed/**
+
+      - name: Attach signed package to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: signed/**

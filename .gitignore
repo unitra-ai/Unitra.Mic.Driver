@@ -1,0 +1,27 @@
+# Build outputs
+x64/
+ARM64/
+Source/*/x64/
+Source/*/ARM64/
+**/Debug/
+**/Release/
+*.obj
+*.pdb
+*.log
+*.tlog
+*.lastbuildstate
+*.idb
+*.ipdb
+*.iobj
+
+# Built / signed driver artifacts — never commit binaries or certs
+*.sys
+*.cat
+*.cer
+*.pfx
+*.cab
+
+# VS / tooling
+.vs/
+packages/
+*.user
