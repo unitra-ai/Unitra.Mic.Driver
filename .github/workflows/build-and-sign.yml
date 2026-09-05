@@ -34,10 +34,39 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Install Windows Driver Kit
+      # The driver projects need the WDK's MSBuild integration (WDK.vsix) so
+      # $(WDKContentRoot) resolves and portcls.h/km headers are on the include
+      # path. Installing the native-desktop workload + the WDK, then the WDK
+      # VSIX into the preinstalled VS, is what wires that up on windows-latest.
+      - name: Install VS driver workload + WDK
         run: |
-          choco install windowsdriverkit11 -y
+          choco install visualstudio2022-workload-nativedesktop -y --no-progress
           if ($LASTEXITCODE -ne 0) { exit 1 }
+          choco install windowsdriverkit11 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Install WDK Visual Studio integration (VSIX)
+        run: |
+          $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' -Recurse `
+            -Filter 'WDK.vsix' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $vsix) {
+            $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits' -Recurse `
+              -Filter '*.vsix' -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match 'WDK' } | Select-Object -First 1
+          }
+          if ($vsix) {
+            Write-Host "Installing $($vsix.FullName)"
+            $installer = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse `
+              -Filter 'VSIXInstaller.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $installer) {
+              $installer = Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio' -Recurse `
+                -Filter 'VSIXInstaller.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            }
+            & $installer.FullName /quiet /admin $vsix.FullName
+            Start-Sleep -Seconds 30
+          } else {
+            Write-Host '::warning::WDK.vsix not found; relying on workload-provided integration'
+          }
 
       - name: Build driver (x64 Release)
         run: msbuild VirtualAudioDriver.sln /p:Configuration=Release /p:Platform=x64
