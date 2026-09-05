@@ -86,10 +86,55 @@ Because it is a root-enumerated software device, creating the devnode uses
 `devcon install ... ROOT\VirtualAudioDriver` (or the `SwDeviceCreate` API). No
 test-signing, no reboot — the Microsoft signature is trusted out of the box.
 
-## Status / TODO
+## Decision (2026-09-05): first-class, own attestation-signed driver
 
-- [ ] Make repo public (required for SignPath Foundation)
-- [ ] Enroll SignPath project; confirm **driver attestation** is included
-- [ ] Link Partner Center (or provide EV cert to SignPath)
-- [ ] Add the secrets/vars above
+We ship **our own Microsoft-attestation-signed driver** so end users get a
+zero-setup "Unitra Microphone" — no test-signing, no third-party cable. This was
+chosen deliberately after ruling out the alternatives:
+
+- **No driverless path.** Windows has a user-mode virtual *camera* framework but
+  no virtual-*microphone* equivalent; a system-visible mic endpoint requires a
+  kernel driver. Injecting into the real mic needs a capture APO — itself a
+  signed, INF-installed driver component.
+- **The app's cert doesn't transfer.** Unitra's desktop app is signed with
+  **Azure Trusted Signing**, which cannot sign kernel drivers and is not an EV
+  substitute for Partner Center. Different cert, different program.
+- **Free SignPath Foundation is not enough.** It issues OV/Authenticode only;
+  kernel attestation needs an **EV** cert. (The upstream fork parent uses
+  SignPath Foundation and still ships "requires test signing".)
+
+### What "attestation" needs (the future setup to complete)
+
+1. **EV code-signing certificate.** Prefer a **cloud EV** (SSL.com eSigner,
+   DigiCert KeyLocker, or Certum) — issues in days, no hardware-token courier,
+   and drives CI directly. Approved EV CAs: Certum, DigiCert, GlobalSign,
+   IdenTrust, Sectigo, SSL.com. (~$250–560/yr; publicly-trusted validity capped
+   at 460 days since 2026-03.)
+2. **Partner Center (Windows Hardware Developer Program) enrollment**, EV cert
+   uploaded there. **This is the slow, unpredictable step** — officially "days",
+   real-world reports weeks to months. Start it early and in parallel.
+3. **Attestation submission** of the built `.cab` (SignPath commercial can
+   automate it, or submit manually). Microsoft returns the signed package.
+
+### Interim, until that's done
+
+- **Beta / internal testers:** test-signing (`install-dev.ps1`), like upstream.
+- **Client UI is honest in the meantime:** `VoiceOutStatus.cable_present` is
+  false with no cable, so "Automatic" reads "Unitra microphone not installed
+  yet" and the main output never falls back to the user's speakers.
+
+## Build CI — TODO
+
+- [ ] Switch the build job to the **WDK NuGet** package
+  (`Microsoft.Windows.WDK.x64` 10.0.26100+, Microsoft's CI standard). The
+  current choco-WDK job is RED because choco ships only a **VS2019** WDK VSIX,
+  incompatible with the runner's VS2022 (`portcls.h` not found). Add
+  `packages.config` + `Directory.Build.props`, `nuget restore`, then `msbuild`.
+
+## Signing pipeline — TODO
+
+- [x] Driver in its own public MIT repo
+- [ ] Buy a cloud EV certificate
+- [ ] Enroll Partner Center (start ASAP — slowest link)
+- [ ] Wire attestation (SignPath commercial or manual) + add the secrets/vars above
 - [ ] Wire the desktop installer to fetch + install the signed release
