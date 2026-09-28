@@ -74,16 +74,18 @@ read credentials from the environment and never print them.
    `co-f41lb40n352` -> *eSigner* -> enroll). Choose a signing PIN, scan the
    TOTP QR in an authenticator app **and keep the TOTP secret text**: it is
    `ES_TOTP_SECRET`. Then get the credential id:
+   Put the four values in `%LOCALAPPDATA%\unitra\esigner.env` (outside every
+   repo; one `KEY=VALUE` per line: `ES_USERNAME`, `ES_PASSWORD`,
+   `ES_CREDENTIAL_ID`, `ES_TOTP_SECRET`). The script reads it, so nothing is
+   typed into a shell history or a chat. Then:
    ```powershell
-   $env:ES_USERNAME='...'; $env:ES_PASSWORD='...'
-   pwsh scripts/esigner-sign.ps1 -Credentials
+   pwsh scripts/esigner-sign.ps1 -Credentials     # prints the credential id(s)
    ```
 2. **Partner Center -> Manage certificates.** Download the signable `.bin`
    from https://partner.microsoft.com/en-us/dashboard/account/v3/managecertificates,
    sign it, upload the signed copy:
    ```powershell
-   $env:ES_CREDENTIAL_ID='...'; $env:ES_TOTP_SECRET='...'   # or answer the OTP prompt
-   pwsh scripts/esigner-sign.ps1 .\Signable.bin
+   pwsh scripts/esigner-sign.ps1 .\Signable.bin   # -> .\signed\Signable.bin
    ```
    This is what ties the EV certificate to the Partner Center account. It
    needs business verification to be complete (Account settings -> Legal
