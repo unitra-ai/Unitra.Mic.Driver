@@ -25,3 +25,8 @@ Source/*/ARM64/
 .vs/
 packages/
 *.user
+
+# Attestation submission outputs
+dist/
+*.cab
+*.ddf

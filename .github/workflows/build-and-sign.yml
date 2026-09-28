@@ -1,15 +1,27 @@
 name: Build and Sign
 
-# Builds the UnitraMic driver and, on a tag or manual run, submits it to
-# SignPath for Microsoft attestation signing. PRs build only (no signing).
+# Builds the UnitraMic driver, packs the Partner Center attestation CAB and,
+# when the eSigner secrets are configured, signs that CAB with Unitra's
+# SSL.com EV code-signing certificate (cloud HSM, no key on the runner).
 #
-# Required repo configuration (see SIGNING.md):
-#   secrets.SIGNPATH_API_TOKEN          - SignPath CI user API token
-#   vars.SIGNPATH_ORGANIZATION_ID       - SignPath organization id (GUID)
-#   vars.SIGNPATH_PROJECT_SLUG          - e.g. "unitra-mic"
-#   vars.SIGNPATH_SIGNING_POLICY_SLUG   - policy configured for Windows driver
-#                                         *attestation* signing (e.g. "release-signing")
-#   vars.SIGNPATH_ARTIFACT_CONFIG_SLUG  - artifact configuration for the driver package
+# What this workflow does NOT do: talk to Partner Center. Microsoft's
+# attestation signing is a portal upload (Hardware dashboard -> Submit new
+# hardware) whose result is downloaded by a human and published with
+# scripts/publish-signed-release.ps1 -- see SIGNING.md, "Runbook". The
+# Hardware API automation is a follow-up once the first signed release ships.
+#
+# Toolchain: the GitHub windows-2022 image ships Visual Studio 2022 Enterprise
+# with WDK 10.1.26100 AND the WDK Visual Studio extension preinstalled, so no
+# chocolatey / VSIX step is needed (the previous version of this file installed
+# a second WDK on top and lost portcls.h). Keep the image pinned: the WDK is
+# not documented for windows-2025.
+#
+# Repo configuration (Settings -> Secrets and variables -> Actions):
+#   vars.ESIGNER_ENABLED        "true" once the secrets below exist
+#   secrets.ES_USERNAME         SSL.com account user name
+#   secrets.ES_PASSWORD         SSL.com account password
+#   secrets.ES_CREDENTIAL_ID    eSigner signing credential id
+#   secrets.ES_TOTP_SECRET      eSigner TOTP secret (unattended OTP)
 
 on:
   workflow_dispatch:
@@ -20,68 +32,47 @@ on:
     branches: [main]
 
 permissions:
-  contents: write   # attach signed artifacts to a release on tags
-  id-token: write   # SignPath OIDC (if used)
+  contents: write   # draft release with the EV-signed CAB on tags
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     outputs:
-      artifact-id: ${{ steps.upload_unsigned.outputs.artifact-id }}
+      driver-ver: ${{ steps.stage.outputs.driver-ver }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # windows-latest already ships VS2022 Enterprise with the C++ toolset, so
-      # only the WDK (headers/libs + its VS MSBuild integration) is missing. The
-      # choco VS-*workload* packages fail here because they can't detect the
-      # image's VS (it wasn't installed by choco) — install just the WDK, then
-      # its VSIX into the preinstalled VS so $(WDKContentRoot) resolves and
-      # portcls.h/km is on the include path.
-      - name: Install Windows Driver Kit
+      - name: Show WDK on this image
+        shell: pwsh
         run: |
-          choco install windowsdriverkit11 -y --no-progress --ignore-package-exit-codes
-          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) { exit 1 }
+          Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory |
+            ForEach-Object { Write-Host "SDK/WDK include: $($_.Name)" }
+          $km = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include\*\km\portcls.h' -ErrorAction SilentlyContinue
+          if (-not $km) { Write-Host '::error::portcls.h not found: this image has no WDK'; exit 1 }
+          $km | ForEach-Object { Write-Host "portcls.h: $($_.FullName)" }
 
-      - name: Install WDK Visual Studio integration (VSIX)
-        run: |
-          $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Vsix' -Recurse `
-            -Filter 'WDK.vsix' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $vsix) {
-            $vsix = Get-ChildItem 'C:\Program Files (x86)\Windows Kits' -Recurse `
-              -Filter '*.vsix' -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match 'WDK' } | Select-Object -First 1
-          }
-          if ($vsix) {
-            Write-Host "Installing $($vsix.FullName)"
-            $installer = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022' -Recurse `
-              -Filter 'VSIXInstaller.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $installer) {
-              $installer = Get-ChildItem 'C:\Program Files (x86)\Microsoft Visual Studio' -Recurse `
-                -Filter 'VSIXInstaller.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-            }
-            & $installer.FullName /quiet /admin $vsix.FullName
-            Start-Sleep -Seconds 30
-          } else {
-            Write-Host '::warning::WDK.vsix not found; relying on workload-provided integration'
-          }
-
-      - name: Build driver (x64 Release)
-        run: msbuild VirtualAudioDriver.sln /p:Configuration=Release /p:Platform=x64
+      - name: Build driver (Release|x64)
+        shell: pwsh
+        run: pwsh scripts/build-release.ps1 -Platform x64
 
       - name: Stage package
         id: stage
+        shell: pwsh
         run: |
-          $pkg = "x64\Release\package"
-          if (-not (Test-Path "$pkg\VirtualAudioDriver.inf")) {
-            Write-Host "::error::driver package not found in $pkg"; exit 1
-          }
+          $pkg = 'x64\Release\package'
           Get-ChildItem $pkg
+          $ver = (Select-String -Path "$pkg\VirtualAudioDriver.inf" -Pattern '^\s*DriverVer\s*=\s*(.+)$' | Select-Object -First 1).Matches[0].Groups[1].Value.Trim()
+          Write-Host "DriverVer: $ver"
+          "driver-ver=$ver" >> $env:GITHUB_OUTPUT
+
+      - name: Pack attestation CAB
+        shell: pwsh
+        run: pwsh scripts/make-attestation-cab.ps1 -OutDir dist
 
       - name: Upload unsigned package
-        id: upload_unsigned
         uses: actions/upload-artifact@v4
         with:
           name: UnitraMic-unsigned-x64
@@ -89,36 +80,75 @@ jobs:
             x64/Release/package/VirtualAudioDriver.sys
             x64/Release/package/VirtualAudioDriver.inf
             x64/Release/package/virtualaudiodriver.cat
+            x64/Release/VirtualAudioDriver.pdb
 
-  sign:
-    # Attestation signing runs only when the signing secrets exist (tags /
-    # manual runs), never on fork PRs.
-    needs: build
-    if: >
-      github.event_name != 'pull_request' &&
-      vars.SIGNPATH_ORGANIZATION_ID != ''
-    runs-on: windows-latest
-    steps:
-      - name: Submit to SignPath (Microsoft attestation)
-        uses: signpath/github-action-submit-signing-request@v1
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIG_SLUG }}
-          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: signed
-
-      - name: Upload signed package
+      - name: Upload attestation CAB (unsigned)
         uses: actions/upload-artifact@v4
         with:
-          name: UnitraMic-signed-x64
-          path: signed/**
+          name: UnitraMic-attestation-cab-unsigned
+          path: dist/UnitraMic.cab
 
-      - name: Attach signed package to release
+  sign:
+    # EV-sign the CAB with eSigner. Never on fork PRs (no secrets there), and
+    # only once the repo variable says the secrets exist, so the pipeline is
+    # safe to merge before the certificate is wired in.
+    needs: build
+    if: github.event_name != 'pull_request' && vars.ESIGNER_ENABLED == 'true'
+    runs-on: windows-2022
+    steps:
+      - name: Download CAB
+        uses: actions/download-artifact@v4
+        with:
+          name: UnitraMic-attestation-cab-unsigned
+          path: cab
+
+      - name: Sign CAB with SSL.com eSigner (EV)
+        uses: sslcom/esigner-codesign@develop
+        with:
+          command: sign
+          username: ${{ secrets.ES_USERNAME }}
+          password: ${{ secrets.ES_PASSWORD }}
+          credential_id: ${{ secrets.ES_CREDENTIAL_ID }}
+          totp_secret: ${{ secrets.ES_TOTP_SECRET }}
+          file_path: ${{ github.workspace }}/cab/UnitraMic.cab
+          output_path: ${{ github.workspace }}/signed
+          malware_block: false
+          environment_name: PROD
+
+      - name: Verify EV signature
+        shell: pwsh
+        run: |
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+          & $signtool.FullName verify /pa /v signed\UnitraMic.cab
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload EV-signed CAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnitraMic-attestation-cab-evsigned
+          path: signed/UnitraMic.cab
+
+      # On a tag, park the EV-signed CAB on a DRAFT release so the operator
+      # has one place to fetch it from for the Partner Center upload. The
+      # release is published (and the Microsoft-signed asset attached) by
+      # scripts/publish-signed-release.ps1 after attestation comes back.
+      - name: Draft release with the submission CAB
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: signed/**
+          draft: true
+          name: UnitraMic ${{ github.ref_name }}
+          body: |
+            Attestation submission for INF DriverVer ${{ needs.build.outputs.driver-ver }}.
+
+            `UnitraMic-submission.cab` is EV-signed and ready for Partner Center
+            (Hardware -> Submit new hardware). After Microsoft returns the signed
+            package, run `scripts/publish-signed-release.ps1 -SignedZip <download> -Tag ${{ github.ref_name }}`
+            to verify it (signtool /kp) and attach `UnitraMic-signed-x64.zip`.
+          files: signed/UnitraMic.cab
+
+      - name: Next step
+        shell: pwsh
+        run: |
+          Write-Host '::notice::EV-signed CAB ready. Upload it at https://partner.microsoft.com/dashboard/hardware/Search (Submit new hardware), select Windows 10 x64 (19041+) and Windows 11 x64, no test-signing options. Then publish the returned package with scripts/publish-signed-release.ps1.'
