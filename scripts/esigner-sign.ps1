@@ -95,7 +95,15 @@ $toolDir = Split-Path -Parent $tool
 $user = Require-Env 'ES_USERNAME'
 $pass = Require-Env 'ES_PASSWORD'
 
-# CodeSignTool.bat must run from its own directory (relative jar paths).
+# Resolve paths BEFORE changing directory: the tool must run from its own
+# folder (relative jar paths), so relative arguments would break afterwards.
+if (-not $Credentials) {
+  $file = (Resolve-Path $Path).Path
+  if (-not $OutDir) { $OutDir = Join-Path (Split-Path -Parent $file) 'signed' }
+  New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+  $OutDir = (Resolve-Path $OutDir).Path
+}
+
 Push-Location $toolDir
 try {
   if ($Credentials) {
@@ -104,10 +112,6 @@ try {
     return
   }
 
-  $file = (Resolve-Path $Path).Path
-  if (-not $OutDir) { $OutDir = Join-Path (Split-Path -Parent $file) 'signed' }
-  New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-  $OutDir = (Resolve-Path $OutDir).Path
   $cred = Require-Env 'ES_CREDENTIAL_ID'
   $totp = [Environment]::GetEnvironmentVariable('ES_TOTP_SECRET')
 
