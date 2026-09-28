@@ -72,6 +72,24 @@ function Require-Env([string]$name) {
   return $v
 }
 
+# Credentials file: KEY=VALUE lines for the ES_* variables, kept OUTSIDE any
+# repo so they never travel through a shell history or a chat transcript.
+# Default %LOCALAPPDATA%\unitra\esigner.env; env vars already set win.
+$envFile = if ($env:ES_ENV_FILE) { $env:ES_ENV_FILE } else { Join-Path $env:LOCALAPPDATA 'unitra\esigner.env' }
+if (Test-Path $envFile) {
+  foreach ($line in Get-Content $envFile) {
+    $t = $line.Trim()
+    if (-not $t -or $t.StartsWith('#')) { continue }
+    $i = $t.IndexOf('=')
+    if ($i -lt 1) { continue }
+    $k = $t.Substring(0, $i).Trim(); $v = $t.Substring($i + 1).Trim().Trim('"')
+    if ($k -like 'ES_*' -and [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($k))) {
+      [Environment]::SetEnvironmentVariable($k, $v)
+    }
+  }
+  Write-Host "Loaded eSigner settings from $envFile"
+}
+
 $tool = Get-CodeSignTool
 $toolDir = Split-Path -Parent $tool
 $user = Require-Env 'ES_USERNAME'
