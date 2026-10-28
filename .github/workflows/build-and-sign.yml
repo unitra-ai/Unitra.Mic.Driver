@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-2022
+    runs-on: [self-hosted, Windows, X64]
     outputs:
       driver-ver: ${{ steps.stage.outputs.driver-ver }}
     steps:
@@ -94,7 +94,7 @@ jobs:
     # safe to merge before the certificate is wired in.
     needs: build
     if: github.event_name != 'pull_request' && vars.ESIGNER_ENABLED == 'true'
-    runs-on: windows-2022
+    runs-on: [self-hosted, Windows, X64]
     steps:
       - name: Download CAB
         uses: actions/download-artifact@v4
